@@ -1,43 +1,86 @@
 # XRL-Ops: Explainable Reinforcement Learning for Control Systems
 
-**XRL-Ops** is a production-grade MLOps backend engineered to deploy, evaluate, and explain sequential decision optimization agents in physical, industrial, and robotic environments. 
+XRL-Ops is a production-grade MLOps backend for deploying, evaluating, and explaining RL agents in industrial and robotic control environments.
 
-Academic reinforcement learning often struggles to transition from simulated environments to real-world industrial deployment due to the "black box" nature of deep RL and the lack of robust serving infrastructure. XRL-Ops solves this by wrapping continuous control policies (via Stable-Baselines3) in a high-concurrency API layer and computing real-time state-action attributions (via SHAP) to ensure safe, auditable decision-making.
+The project combines:
+- Polars-based state ingestion and feature engineering
+- Strict Pydantic validation for control states
+- Async FastAPI inference endpoints for prediction and explanation
+- Stable-Baselines3 PPO policy serving
+- SHAP-based attribution for post-hoc explainability
+- Empirical benchmark validation and safety auditing
+- DVC artifact tracking and Dockerized reproducibility
 
-## 🏗️ Core Architecture
+## Project structure
 
-- **High-Throughput State Ingestion**: Utilizes **Polars** for multi-core processing of time-series sensor data and state variables, strictly avoiding memory bottlenecks.
-- **Explainable Inference (The "X")**: An asynchronous **FastAPI** layer exposes `/predict` (policy action) and `/explain` (SHAP-based feature importance), making the agent's decision matrix fully transparent to human operators.
-- **Empirical Benchmarking**: Integrated `tracker.py` and `evaluate.py` modules record state-action-reward trajectories and track constraint violations to ensure physical safety thresholds are never breached.
-- **Reproducible ML Lifecycle**: Data and model artifacts are versioned via **DVC**, with the entire Python environment pinned immutably using `uv` and containerized via **Docker**.
+- `xrl_ops/data_engine.py` — state validation and feature engineering
+- `xrl_ops/model_adapter.py` — PPO model adapter, mock Gymnasium control environment, and SHAP explainer
+- `xrl_ops/inference_api.py` — FastAPI `/predict` and `/explain` endpoints
+- `xrl_ops/tracker.py` — empirical state-action-reward logging
+- `train.py` — PPO training pipeline
+- `evaluate.py` — benchmark evaluation with metrics and markdown report output
+- `Makefile` — local command runner for install, train, and evaluation
+- `pyproject.toml` — uv-managed project dependencies
+- `Dockerfile` — container runtime for deployment
+- `artifacts/` — generated model and benchmark artifacts
+- `.github/workflows/ci.yml` — CI workflow for policy training and benchmark validation
 
-## 🚀 Quick Start
+## Quick start
 
-**1. Environment Setup**
-Install `uv` for reproducible dependency management:
+### 1. Install dependencies
+
 ```bash
 curl -LsSf https://astral.sh/uv/install.sh | sh
-uv venv
-source .venv/bin/activate
-uv pip install -e .
+uv venv --python 3.12 .venv
+uv pip install --python .venv/bin/python -e ".[dev]"
 ```
 
-**2. Train & Evaluate the Agent**
-Train the PPO agent on the continuous control environment and evaluate its constraint compliance:
+Or, using the provided Make target:
+
 ```bash
-python scripts/train.py --timesteps 100000
-python scripts/evaluate.py --episodes 100
+make install
 ```
-*(Note: Model weights are automatically versioned into `artifacts/models/` via DVC).*
 
-**3. Launch the Inference Server**
+### 2. Train the policy
+
+```bash
+python train.py --timesteps 50000 --model-path artifacts/models/ppo_control_model.zip --seed 42
+```
+
+Or:
+
+```bash
+make train
+```
+
+This saves the model artifact in `artifacts/models/`.
+
+### 3. Evaluate policy safety and performance
+
+```bash
+python evaluate.py --episodes 100 --max-steps 500 --model-path artifacts/models/ppo_control_model.zip --benchmark-dir artifacts/benchmarks --seed 42
+```
+
+Or:
+
+```bash
+make evaluate
+```
+
+This writes:
+- `artifacts/benchmarks/metrics.json`
+- `artifacts/benchmarks/benchmark_report.md`
+
+### 4. Run the API server
+
 ```bash
 uvicorn xrl_ops.inference_api:app --reload --host 0.0.0.0 --port 8000
 ```
 
-## 📡 API Usage
+## API usage
 
-**Get Optimal Control Action:**
+### Predict
+
 ```bash
 curl -X POST http://localhost:8000/predict \
   -H "Content-Type: application/json" \
@@ -50,18 +93,70 @@ curl -X POST http://localhost:8000/predict \
       "power_draw": 540.0,
       "setpoint": 75.0,
       "torque": 120.0,
-      "coolant_temp": 65.0
+      "coolant_temp": 65.0,
+      "timestamp": "2026-10-22T12:00:00Z"
     }
   }'
 ```
 
-**Audit Decision via SHAP Attribution:**
+### Explain
+
 ```bash
 curl -X POST http://localhost:8000/explain \
   -H "Content-Type: application/json" \
-  -d '{ "state": { ... } }'
+  -d '{
+    "state": {
+      "temperature": 72.5,
+      "pressure": 120.0,
+      "flow_rate": 310.0,
+      "vibration": 1.8,
+      "power_draw": 540.0,
+      "setpoint": 75.0,
+      "torque": 120.0,
+      "coolant_temp": 65.0,
+      "timestamp": "2026-10-22T12:00:00Z"
+    }
+  }'
 ```
-*Returns the optimal action alongside the SHAP values indicating which specific sensor states drove the policy's output.*
 
-## 🔬 Engineering Philosophy
-Built under a strict empirical methodology: no unverified assertions. All state inputs are strongly typed via Pydantic, and all policy updates require pre-registered benchmark traces to ensure constraint compliance before deployment.
+The explain endpoint returns SHAP-based attribution values for the operating state, allowing reviewers to inspect which variables contributed most significantly to the chosen control action.
+
+## Benchmarking and safety review
+
+The evaluation process measures:
+- mean reward
+- reward standard deviation
+- min/max reward
+- total constraint violations
+- temperature and pressure violation counts
+- safety pass/fail classification based on configured tolerances
+
+The benchmark report is generated as a Markdown document to support human review and auditability.
+
+## DVC artifact versioning
+
+To initialize DVC and track generated model/benchmark artifacts:
+
+```bash
+dvc init
+dvc add artifacts/models artifacts/benchmarks
+```
+
+This version-controls the trained policy and evaluation outputs so that experiments and model releases remain reproducible.
+
+## CI
+
+The repository includes a GitHub Actions workflow that triggers on pushes to `main` and runs:
+- dependency installation
+- PPO training
+- benchmark evaluation
+- artifact upload for `metrics.json` and `benchmark_report.md`
+
+## Engineering philosophy
+
+This backend is built with a strict empirical methodology:
+- no unverified assertions
+- all state inputs are validated by Pydantic
+- all policy outputs are benchmarked under fixed seeds
+- all safety-critical metrics are logged and auditable
+- model artifacts and benchmark reports are tracked for reproducibility
