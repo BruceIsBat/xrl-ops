@@ -1,0 +1,47 @@
+[project]
+name = "xrl-ops"
+version = "0.1.0"
+description = "Explainable Reinforcement Learning operations backend for industrial control systems"
+readme = "README.md"
+requires-python = ">=3.10,<3.13"
+authors = [{ name = "BruceIsBat" }]
+license = { text = "MIT" }
+dependencies = [
+  "fastapi>=0.115.0,<1.0.0",
+  "uvicorn[standard]>=0.30.0,<1.0.0",
+  "polars>=1.0.0,<2.0.0",
+  "pydantic>=2.9.2,<3.0.0",
+  "pydantic-settings>=2.3.0,<3.0.0",
+  "numpy>=1.26.0,<3.0.0",
+  "scikit-learn>=1.4.0,<2.0.0",
+  "shap>=0.45.0,<1.0.0",
+  "stable-baselines3>=2.3.2,<3.0.0",
+  "ray[rllib]>=2.35.0,<3.0.0",
+  "httpx>=0.27.0,<1.0.0",
+  "orjson>=3.0.0,<4.0.0",
+  "python-dotenv>=1.0.0,<2.0.0",
+  "structlog>=24.1.0,<25.0.0",
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=8.2.0,<9.0.0",
+  "pytest-asyncio>=0.23.0,<1.0.0",
+  "ruff>=0.5.0,<1.0.0",
+  "mypy>=1.10.0,<2.0.0",
+]
+
+[build-system]
+requires = ["hatchling>=1.25.0"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["xrl_ops"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+pythonpath = ["."]
