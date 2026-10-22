@@ -1,38 +1,22 @@
 from __future__ import annotations
 
+import asyncio
 from typing import Any
 
 import numpy as np
-import polars as pl
 from fastapi import FastAPI, HTTPException, status
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field
 
-from .data_engine import DataEngine
+from .data_engine import ControlState, DataEngine
+from .model_adapter import RLModelAdapter
+from .tracker import TrajectoryRecord, TrajectoryTracker
 
 
 class PredictRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    state: dict[str, float] = Field(..., min_length=1)
-    metadata: dict[str, str] = Field(default_factory=dict)
-
-    @field_validator("state")
-    @classmethod
-    def validate_state_keys(cls, values: dict[str, float]) -> dict[str, float]:
-        allowed = {
-            "temperature",
-            "pressure",
-            "flow_rate",
-            "vibration",
-            "power_draw",
-            "setpoint",
-            "torque",
-            "coolant_temp",
-        }
-        unknown = set(values) - allowed
-        if unknown:
-            raise ValueError(f"Unsupported state keys: {sorted(unknown)}")
-        return values
+    state: ControlState
+    metadata: dict[str, Any] = Field(default_factory=dict)
 
 
 class ExplainRequest(PredictRequest):
@@ -62,29 +46,49 @@ app = FastAPI(
 )
 
 engine = DataEngine()
+model_adapter = RLModelAdapter()
+tracker = TrajectoryTracker()
 
 
-def _action_from_state(state: dict[str, float]) -> dict[str, float]:
+def _state_vector(state: ControlState) -> np.ndarray:
+    return np.asarray(
+        [
+            state.temperature,
+            state.pressure,
+            state.flow_rate,
+            state.vibration,
+            state.power_draw,
+            state.setpoint,
+            state.torque,
+            state.coolant_temp,
+        ],
+        dtype=np.float32,
+    )
+
+
+def _action_dict(action_vector: np.ndarray) -> dict[str, float]:
     return {
-        "coolant_flow_adjustment": float(state["setpoint"] * 0.18 + state["temperature"] * 0.12),
-        "motor_torque_target": float(state["torque"] * 0.35 + state["power_draw"] * 0.05),
-        "pressure_trim": float((state["pressure"] - state["setpoint"]) * 0.04),
+        name: float(value)
+        for name, value in zip(model_adapter.action_names(), action_vector.astype(np.float64))
     }
 
 
-def _explain_state(state: dict[str, float]) -> dict[str, float]:
-    raw_scores = {
-        "temperature": abs(state.get("temperature", 0.0)),
-        "pressure": abs(state.get("pressure", 0.0)),
-        "flow_rate": abs(state.get("flow_rate", 0.0)),
-        "vibration": abs(state.get("vibration", 0.0)),
-        "power_draw": abs(state.get("power_draw", 0.0)),
-        "setpoint": abs(state.get("setpoint", 0.0)),
-        "torque": abs(state.get("torque", 0.0)),
-        "coolant_temp": abs(state.get("coolant_temp", 0.0)),
-    }
-    total = sum(raw_scores.values()) or 1.0
-    return {key: value / total for key, value in raw_scores.items()}
+async def _log_prediction(request: PredictRequest, action: dict[str, float], confidence: float) -> None:
+    record = TrajectoryRecord(
+        episode_id=str(request.metadata.get("episode_id", "inference")),
+        step_index=int(request.metadata.get("step_index", 0)),
+        state=request.state.model_dump(mode="python", exclude={"timestamp"}),
+        action=action,
+        reward=float(confidence),
+        terminated=False,
+        truncated=False,
+        metadata={
+            "endpoint": "predict",
+            "source": "stable-baselines3-ppo",
+            "confidence": confidence,
+        },
+    )
+    await asyncio.to_thread(tracker.log, record)
 
 
 @app.get("/health")
@@ -95,7 +99,8 @@ async def health() -> dict[str, str]:
 @app.post("/predict", response_model=PredictResponse)
 async def predict(request: PredictRequest) -> PredictResponse:
     try:
-        prepared = engine.prepare_for_rl([request.state])
+        payload = request.state.model_dump(mode="python", exclude={"timestamp"})
+        prepared = engine.prepare_for_rl([payload])
         feature_df = prepared["features"]
         if feature_df.height == 0:
             raise HTTPException(
@@ -108,8 +113,12 @@ async def predict(request: PredictRequest) -> PredictResponse:
             detail=str(exc),
         ) from exc
 
-    action = _action_from_state(request.state)
-    confidence = float(np.clip(np.mean(list(request.state.values())) / 100.0, 0.0, 1.0))
+    state_vector = _state_vector(request.state)
+    action_vector = await asyncio.to_thread(model_adapter.predict, state_vector)
+    action = _action_dict(action_vector)
+    confidence = float(np.clip(np.linalg.norm(action_vector) / np.sqrt(action_vector.size), 0.0, 1.0))
+
+    await _log_prediction(request, action, confidence)
 
     return PredictResponse(
         action=action,
@@ -117,7 +126,8 @@ async def predict(request: PredictRequest) -> PredictResponse:
         metadata={
             "feature_columns": prepared["feature_columns"],
             "state_shape": feature_df.shape,
-            "source": "deterministic_policy_stub",
+            "source": "stable-baselines3-ppo",
+            "model_path": str(model_adapter.model_path),
         },
     )
 
@@ -125,7 +135,8 @@ async def predict(request: PredictRequest) -> PredictResponse:
 @app.post("/explain", response_model=ExplainResponse)
 async def explain(request: ExplainRequest) -> ExplainResponse:
     try:
-        prepared = engine.prepare_for_rl([request.state])
+        payload = request.state.model_dump(mode="python", exclude={"timestamp"})
+        prepared = engine.prepare_for_rl([payload])
         feature_df = prepared["features"]
         if feature_df.height == 0:
             raise HTTPException(
@@ -138,7 +149,8 @@ async def explain(request: ExplainRequest) -> ExplainResponse:
             detail=str(exc),
         ) from exc
 
-    attribution = _explain_state(request.state)
+    state_vector = _state_vector(request.state)
+    attribution = await asyncio.to_thread(model_adapter.explain, state_vector)
     top_features = sorted(attribution, key=attribution.get, reverse=True)[:5]
 
     return ExplainResponse(
@@ -146,7 +158,8 @@ async def explain(request: ExplainRequest) -> ExplainResponse:
         top_features=top_features,
         metadata={
             "feature_columns": prepared["feature_columns"],
-            "explanation_method": "heuristic_attribution",
+            "explanation_method": "shap_kernel_explainer",
             "state_shape": feature_df.shape,
+            "model_path": str(model_adapter.model_path),
         },
     )
