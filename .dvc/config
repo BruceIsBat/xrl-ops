@@ -1,0 +1,17 @@
+stages:
+  train:
+    cmd: python train.py --timesteps 50000 --model-path artifacts/models/ppo_control_model.zip --seed 42
+    deps:
+      - train.py
+      - xrl_ops/model_adapter.py
+      - pyproject.toml
+    outs:
+      - artifacts/models/ppo_control_model.zip
+
+  evaluate:
+    cmd: python evaluate.py --episodes 100 --max-steps 500 --model-path artifacts/models/ppo_control_model.zip --benchmark-path artifacts/benchmarks/eval_report.json --seed 42
+    deps:
+      - evaluate.py
+      - artifacts/models/ppo_control_model.zip
+    metrics:
+      - artifacts/benchmarks/eval_report.json
