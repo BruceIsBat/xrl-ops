@@ -1,18 +1,16 @@
-PYTHON ?= python
+stages:
+  train:
+    cmd: python train.py --timesteps 50000 --model-path artifacts/models/ppo_control_model.zip --seed 42
+    outs:
+      - artifacts/models/ppo_control_model.zip
 
-.PHONY: install train evaluate dvc-init dvc-add
-
-install:
-	$(PYTHON) -m pip install -e ".[dev]"
-
-train:
-	$(PYTHON) train.py --timesteps 50000 --model-path artifacts/models/ppo_control_model.zip --seed 42
-
-evaluate:
-	$(PYTHON) evaluate.py --episodes 100 --max-steps 500 --model-path artifacts/models/ppo_control_model.zip --benchmark-path artifacts/benchmarks/eval_report.json --seed 42
-
-dvc-init:
-	dvc init
-
-dvc-add:
-	dvc add artifacts/models artifacts/benchmarks
+  evaluate:
+    cmd: python evaluate.py --episodes 100 --max-steps 500 --model-path artifacts/models/ppo_control_model.zip --benchmark-dir artifacts/benchmarks --seed 42 --temp-violation-tolerance 10 --pressure-violation-tolerance 10
+    deps:
+      - train.py
+      - evaluate.py
+      - xrl_ops/model_adapter.py
+    metrics:
+      - artifacts/benchmarks/metrics.json
+    plots:
+      - artifacts/benchmarks/benchmark_report.md
