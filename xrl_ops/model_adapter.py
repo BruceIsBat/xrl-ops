@@ -117,13 +117,16 @@ class IndustrialControlEnv(gym.Env):
 @dataclass(slots=True)
 class RLModelAdapter:
     feature_names: list[str] = field(default_factory=lambda: FEATURE_NAMES)
-    model_path: Path = field(default_factory=lambda: Path("artifacts/models/mock_ppo_control.zip"))
+    model_path: Path = field(default_factory=lambda: Path("artifacts/models/ppo_control_model.zip"))
     background_data: np.ndarray = field(init=False)
     _model: PPO | None = field(init=False, default=None)
     _explainer: shap.Explainer | None = field(init=False, default=None)
 
     def __post_init__(self) -> None:
         self.model_path.parent.mkdir(parents=True, exist_ok=True)
+        legacy_model_path = Path("artifacts/models/mock_ppo_control.zip")
+        if not self.model_path.exists() and legacy_model_path.exists():
+            self.model_path = legacy_model_path
         self._model = self._load_or_create_model()
         self.background_data = self._build_background_data()
         self._explainer = shap.Explainer(
